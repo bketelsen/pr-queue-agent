@@ -28,7 +28,7 @@ Agents open GitHub pull requests from inside a Matrix thread. This plugin record
 3. If the call ran in a thread and the pull request is not linked to it yet, the hook writes one state event for it.
 4. Chat clients read the state events of the room and show the links of each thread.
 
-The hook ignores failed and blocked calls, calls outside a thread, shell commands that do not contain `gh pr create`, and results without a pull request URL. A failure of the hook never reaches the turn: it logs a warning.
+The hook ignores calls that raised or were blocked, calls outside a thread, shell commands that do not contain `gh pr create`, and results without a pull request URL. A shell command that fails without raising but prints an existing pull request's URL (as `gh pr create` does when the branch already has one) links that pull request. A failure of the hook never reaches the turn: it logs a warning.
 
 ## Agent Tools
 

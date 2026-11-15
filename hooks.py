@@ -6,12 +6,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.hooks import hook
+from mindroom.plugin_api import hook
 
 from .state import ThreadLink, find_pull_request, read_thread_links, write_thread_link
 
 if TYPE_CHECKING:
-    from mindroom.hooks import ToolAfterCallContext
+    from mindroom.plugin_api import ToolAfterCallContext
 
 _SHELL_TOOL = "run_shell_command"
 _GITHUB_TOOL = "create_pull_request"
