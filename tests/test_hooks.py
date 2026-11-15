@@ -99,6 +99,21 @@ async def test_list_arguments_and_new_branch_url_link_the_real_pull_request() ->
 
 
 @pytest.mark.asyncio
+async def test_shell_command_links_the_last_pull_request_url() -> None:
+    """`gh pr create` prints the created URL last, after any URL an earlier command printed."""
+    module = _load_hooks_module()
+    ctx = _context(
+        arguments={"args": "gh pr view 5; gh pr create --fill"},
+        result=f"title: old\nurl: https://github.com/o/r/pull/5\n{PR_URL}\n",
+    )
+
+    await module.link_created_pull_request(ctx)
+
+    ctx.put_room_state.assert_awaited_once()
+    assert ctx.put_room_state.await_args.args[2] == '["$thread-root","o/r#7"]'
+
+
+@pytest.mark.asyncio
 async def test_create_pull_request_tool_links_its_result() -> None:
     """The github toolkit's `create_pull_request` links the URL in its JSON result."""
     module = _load_hooks_module()

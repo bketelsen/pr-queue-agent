@@ -65,6 +65,12 @@ def test_parse_pull_request_accepts_pull_request_urls(url: str) -> None:
         "https://github.com/o/r/pull/4\n",
         " https://github.com/o/r/pull/4",
         "https://github.com/o/r/pull/\u0664",
+        "https://github.com/o/r/pull/4/ trailing words",
+        "https://github.com/o/r/pull/4?x\nmore",
+        f"https://github.com/{'o' * 40}/r/pull/4",
+        'https://github.com/o"x/r/pull/4',
+        "https://github.com/o%20x/r/pull/4",
+        "https://github.com/o/r/pull/12345678901",
         None,
         4,
     ],
@@ -75,14 +81,23 @@ def test_parse_pull_request_refuses_other_input(url: object) -> None:
     assert module.parse_pull_request(url) is None
 
 
-def test_find_pull_request_returns_first_pull_request_url() -> None:
-    """The first real pull request URL in a text wins."""
+def test_parse_pull_request_accepts_longest_names() -> None:
+    """An owner of 39 characters, a repository of 100 and a number of 10 digits parse."""
+    module = _load_state_module()
+    pull_request = module.parse_pull_request(f"https://github.com/{'o' * 39}/{'r' * 100}/pull/1234567890")
+    assert pull_request is not None
+    assert pull_request.number == 1234567890
+
+
+def test_last_pull_request_returns_last_pull_request_url() -> None:
+    """The last real pull request URL in a text wins."""
     module = _load_state_module()
     text = "remote: https://github.com/o/r/pull/new/x\nhttps://github.com/o/r/pull/7\nhttps://github.com/o/r/pull/8"
-    found = module.find_pull_request(text)
+    found = module.last_pull_request(text)
     assert found is not None
-    assert found.number == 7
-    assert module.find_pull_request("nothing here") is None
+    assert found.number == 8
+    assert module.last_pull_request("nothing here") is None
+    assert module.last_pull_request('{"a":"https://github.com/foo","b":"x/y/pull/7"}') is None
 
 
 @pytest.mark.parametrize(
@@ -93,18 +108,25 @@ def test_find_pull_request_returns_first_pull_request_url() -> None:
         "see https://github.com/o/r/pull/7.",
     ],
 )
-def test_find_pull_request_finds_url_in_json_and_prose(text: str) -> None:
+def test_last_pull_request_finds_url_in_json_and_prose(text: str) -> None:
     """A found URL may sit in JSON, parentheses or before punctuation."""
     module = _load_state_module()
-    found = module.find_pull_request(text)
+    found = module.last_pull_request(text)
     assert found is not None
     assert found.name == "o/r#7"
 
 
-def test_find_pull_request_skips_url_with_number_suffix() -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://github.com/o/r/pull/4x https://github.com/o/r/pull/9",
+        "https://github.com/o/r/pull/9 https://github.com/o/r/pull/4x",
+    ],
+)
+def test_last_pull_request_skips_url_with_number_suffix(text: str) -> None:
     """A number followed by a letter is no pull request."""
     module = _load_state_module()
-    found = module.find_pull_request("https://github.com/o/r/pull/4x https://github.com/o/r/pull/9")
+    found = module.last_pull_request(text)
     assert found is not None
     assert found.name == "o/r#9"
 

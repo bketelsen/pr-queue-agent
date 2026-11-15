@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.plugin_api import hook
 
-from .state import ThreadLink, find_pull_request, read_thread_links, write_thread_link
+from .state import ThreadLink, last_pull_request, read_thread_links, write_thread_link
 
 if TYPE_CHECKING:
     from mindroom.plugin_api import ToolAfterCallContext
@@ -36,7 +36,7 @@ async def link_created_pull_request(ctx: ToolAfterCallContext) -> None:
         return
     if ctx.result is None or not _creates_pull_request(ctx):
         return
-    pull_request = find_pull_request(str(ctx.result))
+    pull_request = last_pull_request(str(ctx.result))
     if pull_request is None:
         return
     try:
