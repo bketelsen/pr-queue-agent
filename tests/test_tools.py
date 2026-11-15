@@ -156,6 +156,32 @@ async def test_each_tool_errors_outside_a_thread() -> None:
     room.querier.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("thread_id", "resolved_thread_id"),
+    [
+        (None, "$new-root"),
+        ("$a", "$b"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_tools_use_the_resolved_thread(thread_id: str | None, resolved_thread_id: str) -> None:
+    """The resolved thread root is the thread, also for the message that starts a thread."""
+    tools = _load_tools_module().PullRequestTools()
+    room = FakeRoomState()
+
+    with room.context(thread_id=thread_id, resolved_thread_id=resolved_thread_id):
+        link = json.loads(await tools.link_pull_request("https://github.com/owner/repo/pull/7"))
+        listed = json.loads(await tools.list_pull_requests())
+        unlink = json.loads(await tools.unlink_pull_request("https://github.com/owner/repo/pull/7"))
+
+    assert [link["status"], listed["status"], unlink["status"]] == ["ok"] * 3
+    assert [link["thread_id"], listed["thread_id"], unlink["thread_id"]] == [resolved_thread_id] * 3
+    assert [link["changed"], unlink["changed"]] == [True, True]
+    assert [item["name"] for item in listed["pull_requests"]] == ["owner/repo#7"]
+    key = json.dumps([resolved_thread_id, "owner/repo#7"], separators=(",", ":"))
+    assert room.state == {(ROOM, EVENT_TYPE, key): {}}
+
+
 @pytest.mark.asyncio
 async def test_tool_errors_without_runtime_context() -> None:
     """A missing runtime context is an error, not a crash."""

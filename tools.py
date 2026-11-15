@@ -51,12 +51,12 @@ def _resolve_state_access(
     context = get_tool_runtime_context()
     if context is None:
         return _error(action, "Pull request tool context is unavailable in this runtime path.")
-    if context.thread_id is None:
+    if context.resolved_thread_id is None:
         return _error(action, f"An active thread is required to {action} pull requests.")
     bindings = context.hooks
     if bindings.room_state_querier is None or (require_putter and bindings.room_state_putter is None):
         return _error(action, "Pull request room-state access is unavailable in this runtime path.")
-    return context, context.room_id, context.resolved_thread_id or context.thread_id, bindings
+    return context, context.room_id, context.resolved_thread_id, bindings
 
 
 def _parse_or_error(action: str, url: str) -> PullRequest | str:
@@ -73,9 +73,9 @@ class PullRequestTools(Toolkit):
         super().__init__(
             name="pull_requests",
             instructions=(
-                "Use these tools to record which GitHub pull requests belong to the current thread. "
-                "Link a pull request when you open or adopt one for this thread's work, "
-                "and unlink it when it no longer belongs here."
+                "A pull request you create in this thread with `gh pr create` or the GitHub tool is linked by itself. "
+                "Use `link_pull_request` for any other pull request that belongs to this thread, "
+                "and `unlink_pull_request` when one no longer belongs here."
             ),
             tools=[
                 self.link_pull_request,
