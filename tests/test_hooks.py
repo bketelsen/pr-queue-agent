@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from importlib import util
 from pathlib import Path
@@ -114,19 +115,84 @@ async def test_shell_command_links_the_last_pull_request_url() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_pull_request_tool_links_its_result() -> None:
-    """The github toolkit's `create_pull_request` links the URL in its JSON result."""
+async def test_gh_pr_new_links_the_created_pull_request() -> None:
+    """`gh pr new` is an alias of `gh pr create`."""
     module = _load_hooks_module()
-    ctx = _context(
-        tool_name="create_pull_request",
-        arguments={"repo_name": "o/r"},
-        result=f'{{"id": 1, "html_url": "{PR_URL}", "number": 7}}',
-    )
+    ctx = _context(arguments={"args": "gh pr new --fill"})
 
     await module.link_created_pull_request(ctx)
 
     ctx.put_room_state.assert_awaited_once()
     assert ctx.put_room_state.await_args.args[2] == '["$thread-root","o/r#7"]'
+
+
+@pytest.mark.asyncio
+async def test_failed_create_links_the_existing_pull_request() -> None:
+    """A `gh pr create` that fails because the branch has a pull request links that pull request."""
+    module = _load_hooks_module()
+    ctx = _context(
+        result=(
+            "[cwd: /w]\nExit code 1\n"
+            'a pull request for branch "x" into branch "main" already exists:\n'
+            "https://github.com/o/r/pull/12\n"
+        ),
+    )
+
+    await module.link_created_pull_request(ctx)
+
+    ctx.put_room_state.assert_awaited_once()
+    assert ctx.put_room_state.await_args.args[2] == '["$thread-root","o/r#12"]'
+
+
+def _github_result(**fields: object) -> str:
+    """Return a result shaped as the github toolkit's `create_pull_request` returns it."""
+    pr_info = {
+        "number": 7,
+        "title": "Fix the parser",
+        "body": "Follows up on https://github.com/o/r/pull/5.",
+        "user": "coder",
+        "state": "open",
+        "created_at": "2026-11-15T10:00:00+00:00",
+        "html_url": PR_URL,
+        "base": "main",
+        "head": "fix-parser",
+        "mergeable": None,
+    }
+    pr_info.update(fields)
+    return json.dumps(pr_info, indent=2)
+
+
+@pytest.mark.asyncio
+async def test_create_pull_request_tool_links_its_html_url() -> None:
+    """The github toolkit's `create_pull_request` links its `html_url`, not a URL its body mentions."""
+    module = _load_hooks_module()
+    ctx = _context(tool_name="create_pull_request", arguments={"repo_name": "o/r"}, result=_github_result())
+
+    await module.link_created_pull_request(ctx)
+
+    ctx.put_room_state.assert_awaited_once()
+    assert ctx.put_room_state.await_args.args[2] == '["$thread-root","o/r#7"]'
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        json.dumps({"error": "422 Validation Failed https://github.com/o/r/pull/5"}),
+        f"Created {PR_URL}",
+        json.dumps([PR_URL]),
+        _github_result(html_url=None),
+        _github_result(html_url="https://github.com/o/r/issues/7"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_create_pull_request_tool_without_html_url_links_nothing(result: str) -> None:
+    """An error payload, a result that is not a JSON object, or one without a pull request `html_url` links nothing."""
+    module = _load_hooks_module()
+    ctx = _context(tool_name="create_pull_request", arguments={"repo_name": "o/r"}, result=result)
+
+    await module.link_created_pull_request(ctx)
+
+    ctx.put_room_state.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

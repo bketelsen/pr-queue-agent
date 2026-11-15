@@ -3,40 +3,49 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.plugin_api import hook
 
-from .state import ThreadLink, last_pull_request, read_thread_links, write_thread_link
+from .state import ThreadLink, last_pull_request, parse_pull_request, read_thread_links, write_thread_link
 
 if TYPE_CHECKING:
     from mindroom.plugin_api import ToolAfterCallContext
 
+    from .state import PullRequest
+
 _SHELL_TOOL = "run_shell_command"
 _GITHUB_TOOL = "create_pull_request"
-_CREATE_COMMAND = "gh pr create"
+_CREATE_COMMANDS = ("gh pr create", "gh pr new")
 
 
-def _creates_pull_request(ctx: ToolAfterCallContext) -> bool:
+def _created_pull_request(ctx: ToolAfterCallContext) -> PullRequest | None:
+    """Return the pull request a call created: the github tool's `html_url`, or a shell result's last URL."""
+    result = str(ctx.result)
     if ctx.tool_name == _GITHUB_TOOL:
-        return True
+        try:
+            payload = json.loads(result)
+        except ValueError:
+            return None
+        return parse_pull_request(payload.get("html_url")) if isinstance(payload, dict) else None
     if ctx.tool_name != _SHELL_TOOL:
-        return False
+        return None
     command = ctx.arguments.get("args")
     if isinstance(command, list):
         command = " ".join(str(part) for part in command)
-    return isinstance(command, str) and _CREATE_COMMAND in command
+    if not isinstance(command, str) or not any(create in command for create in _CREATE_COMMANDS):
+        return None
+    return last_pull_request(result)
 
 
 @hook(event="tool:after_call", name="link-created-pull-request", timeout_ms=5000)
 async def link_created_pull_request(ctx: ToolAfterCallContext) -> None:
     """Link the pull request a tool call created to the thread it ran in."""
-    if ctx.error is not None or ctx.blocked or ctx.room_id is None or ctx.thread_id is None:
+    if ctx.error is not None or ctx.blocked or ctx.result is None or ctx.room_id is None or ctx.thread_id is None:
         return
-    if ctx.result is None or not _creates_pull_request(ctx):
-        return
-    pull_request = last_pull_request(str(ctx.result))
+    pull_request = _created_pull_request(ctx)
     if pull_request is None:
         return
     try:
