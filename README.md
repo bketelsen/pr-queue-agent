@@ -23,12 +23,14 @@ Agents open GitHub pull requests from inside a Matrix thread. This plugin record
 
 ## How It Works
 
-1. An agent creates a pull request with `gh pr create` in its shell tool, or with the `github` toolkit's `create_pull_request`.
-2. After the call, the `link-created-pull-request` hook looks for the first pull request URL in the result.
+1. An agent creates a pull request with `gh pr create` (or its alias `gh pr new`) in its shell tool, or with the `github` toolkit's `create_pull_request`.
+2. After the call, the `link-created-pull-request` hook picks the created pull request: for a shell command, the last pull request URL of the output, which is where `gh pr create` prints it; for the `github` toolkit, the `html_url` of the created pull request in its JSON result.
 3. If the call ran in a thread and the pull request is not linked to it yet, the hook writes one state event for it.
 4. Chat clients read the state events of the room and show the links of each thread.
 
-The hook ignores calls that raised or were blocked, calls outside a thread, shell commands that do not contain `gh pr create`, and results without a pull request URL. A shell command that fails without raising but prints an existing pull request's URL (as `gh pr create` does when the branch already has one) links that pull request. A failure of the hook never reaches the turn: it logs a warning.
+The hook ignores calls that raised or were blocked, calls outside a thread, shell commands that contain neither `gh pr create` nor `gh pr new`, shell output without a pull request URL, and `github` toolkit results without a pull request `html_url`, such as its error payloads. A shell command that fails without raising but prints an existing pull request's URL (as `gh pr create` does when the branch already has one) links that pull request. A failure of the hook never reaches the turn: it logs a warning.
+
+Writing a link needs the right to send that state event in the room; when the agent's account lacks it, MindRoom retries through the router account.
 
 ## Agent Tools
 
@@ -40,7 +42,9 @@ The toolkit is named `pull_requests`.
 | `unlink_pull_request(url)` | Remove the link of a pull request from the current thread |
 | `list_pull_requests()` | List the pull requests linked to the current thread |
 
-All three tools are thread-scoped only. They refuse to operate at room level.
+All three tools are thread-scoped only. They work from a thread's first message on, and refuse to operate at room level.
+
+A pull request an agent creates in the thread with `gh pr create` or the `github` toolkit is linked by itself; `link_pull_request` is for any other pull request that belongs to the thread.
 
 ## Hooks
 
