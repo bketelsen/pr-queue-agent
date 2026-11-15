@@ -61,6 +61,10 @@ def test_parse_pull_request_accepts_pull_request_urls(url: str) -> None:
         "github.com/o/r/pull/4",
         "https://github.com/o/r/pull/0",
         "https://github.com/o/r/pull/4x",
+        "https://github.com/o/r/pull/4 trailing words",
+        "https://github.com/o/r/pull/4\n",
+        " https://github.com/o/r/pull/4",
+        "https://github.com/o/r/pull/\u0664",
         None,
         4,
     ],
@@ -79,6 +83,30 @@ def test_find_pull_request_returns_first_pull_request_url() -> None:
     assert found is not None
     assert found.number == 7
     assert module.find_pull_request("nothing here") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"url": "https://github.com/o/r/pull/7", "number": 7}',
+        "(https://github.com/o/r/pull/7)",
+        "see https://github.com/o/r/pull/7.",
+    ],
+)
+def test_find_pull_request_finds_url_in_json_and_prose(text: str) -> None:
+    """A found URL may sit in JSON, parentheses or before punctuation."""
+    module = _load_state_module()
+    found = module.find_pull_request(text)
+    assert found is not None
+    assert found.name == "o/r#7"
+
+
+def test_find_pull_request_skips_url_with_number_suffix() -> None:
+    """A number followed by a letter is no pull request."""
+    module = _load_state_module()
+    found = module.find_pull_request("https://github.com/o/r/pull/4x https://github.com/o/r/pull/9")
+    assert found is not None
+    assert found.name == "o/r#9"
 
 
 def test_link_state_key_is_compact_json() -> None:

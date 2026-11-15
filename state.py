@@ -14,9 +14,9 @@ THREAD_PULL_REQUEST_EVENT_TYPE = "com.mindroom.thread.pull_request"
 type RoomStateQuerier = Callable[[str, str, str | None], Awaitable[dict[str, Any] | None]]
 type RoomStatePutter = Callable[[str, str, str, dict[str, Any]], Awaitable[bool]]
 
-_PULL_REQUEST_URL = re.compile(
-    r"https://github\.com/(?P<owner>[^/\s?#]+)/(?P<repo>[^/\s?#]+)/pull/(?P<number>\d+)(?=$|[/?#\s])",
-)
+_PREFIX = r"https://github\.com/(?P<owner>[^/\s?#]+)/(?P<repo>[^/\s?#]+)/pull/(?P<number>[0-9]+)"
+_WHOLE_URL = re.compile(_PREFIX + r"(?:\Z|[/?#])")
+_URL_IN_TEXT = re.compile(_PREFIX + r"(?![A-Za-z0-9_-])")
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,13 +58,13 @@ def parse_pull_request(url: object) -> PullRequest | None:
     """Parse a string that is exactly one pull request URL."""
     if not isinstance(url, str):
         return None
-    match = _PULL_REQUEST_URL.match(url)
+    match = _WHOLE_URL.match(url)
     return _from_match(match) if match else None
 
 
 def find_pull_request(text: str) -> PullRequest | None:
     """Return the first pull request URL found in a text."""
-    for match in _PULL_REQUEST_URL.finditer(text):
+    for match in _URL_IN_TEXT.finditer(text):
         pull_request = _from_match(match)
         if pull_request is not None:
             return pull_request
