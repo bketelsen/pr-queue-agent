@@ -1,0 +1,81 @@
+# Pull Requests
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-plugins-blue)](https://docs.mindroom.chat/plugins/)
+[![Hooks](https://img.shields.io/badge/docs-hooks-blue)](https://docs.mindroom.chat/hooks/)
+
+<picture>
+  <source media="(prefers-reduced-motion: no-preference)" srcset="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark-animated.svg" />
+  <img src="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark.svg" alt="MindRoom Logo" align="right" width="120" />
+</picture>
+
+Pull request links for the threads of [MindRoom](https://github.com/mindroom-ai/mindroom) agents.
+
+Agents open GitHub pull requests from inside a Matrix thread. This plugin records which pull requests belong to which thread, as Matrix room state, so that a chat client can show them next to the thread. The pull request client plugin of MindRoom Chat ([`mindroom-ai/pull-request-client-plugin`](https://github.com/mindroom-ai/pull-request-client-plugin)) shows these links on thread cards.
+
+## Features
+
+- Stores each link as a Matrix state event under `com.mindroom.thread.pull_request`
+- Links a pull request automatically when an agent's tool call creates one
+- Exposes thread-scoped tools to link, unlink, and list pull requests by hand
+- Allows several pull requests per thread, and one pull request in several threads
+- Records `set_by` and `set_at` metadata with every link
+
+## How It Works
+
+1. An agent creates a pull request with `gh pr create` in its shell tool, or with the `github` toolkit's `create_pull_request`.
+2. After the call, the `link-created-pull-request` hook looks for the first pull request URL in the result.
+3. If the call ran in a thread and the pull request is not linked to it yet, the hook writes one state event for it.
+4. Chat clients read the state events of the room and show the links of each thread.
+
+The hook ignores failed and blocked calls, calls outside a thread, shell commands that do not contain `gh pr create`, and results without a pull request URL. A failure of the hook never reaches the turn: it logs a warning.
+
+## Agent Tools
+
+The toolkit is named `pull_requests`.
+
+| Tool | Purpose |
+|------|---------|
+| `link_pull_request(url)` | Link a GitHub pull request, given by its URL, to the current thread |
+| `unlink_pull_request(url)` | Remove the link of a pull request from the current thread |
+| `list_pull_requests()` | List the pull requests linked to the current thread |
+
+All three tools are thread-scoped only. They refuse to operate at room level.
+
+## Hooks
+
+| Hook | Event | Purpose |
+|------|-------|---------|
+| `link-created-pull-request` | `tool:after_call` | Link the pull request a shell or `github` tool call created to its thread |
+
+## Storage
+
+- Event type: `com.mindroom.thread.pull_request`
+- State key: `["<thread root event ID>","<owner>/<repo>#<number>"]` as compact JSON, with owner and repository in lower case
+- Payload fields: `url` (`https://github.com/<owner>/<repo>/pull/<number>`, lower case), `set_by`, `set_at`
+- Unlinking writes an empty payload (`{}`) for that state key
+
+## Install
+
+Vendor this plugin with the MindRoom CLI:
+
+```bash
+mindroom plugins install pull-request-plugin
+```
+
+Then reference it from `config.yaml`:
+
+```yaml
+plugins:
+  - path: plugins/pull-request-plugin
+```
+
+Add `pull_requests` to the tools list of each agent that should link pull requests by hand. The hook works for every agent once the plugin is loaded.
+
+Update to the latest commit later with:
+
+```bash
+mindroom plugins update pull-request-plugin
+```
+
+The command pins the exact installed commit in `.mindroom-plugin.lock.json` and strictly validates the plugin before activating it.
