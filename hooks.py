@@ -22,7 +22,12 @@ _CREATE_COMMANDS = ("gh pr create", "gh pr new")
 
 
 def _created_pull_request(ctx: ToolAfterCallContext) -> PullRequest | None:
-    """Return the pull request a call created: the github tool's `html_url`, or a shell result's last URL."""
+    """Return the pull request a call created: the github tool's `html_url`, or a shell result's last URL.
+
+    A successful command's stdout, before any `Stderr:` section, is where `gh pr create` prints the URL, so it wins over
+    a URL a warning mentions; a failure keeps the whole result, where `gh` names the branch's existing pull request.
+    The receipt of output saved to a file, a dict or its JSON text, is not that output, so it links nothing.
+    """
     result = str(ctx.result)
     if ctx.tool_name == _GITHUB_TOOL:
         try:
@@ -37,7 +42,22 @@ def _created_pull_request(ctx: ToolAfterCallContext) -> PullRequest | None:
         command = " ".join(str(part) for part in command)
     if not isinstance(command, str) or not any(create in command for create in _CREATE_COMMANDS):
         return None
-    return last_pull_request(result)
+    receipt = ctx.result
+    if not isinstance(receipt, dict) and result.startswith("{"):
+        try:
+            receipt = json.loads(result)
+        except (ValueError, RecursionError):  # output that is not JSON, or nests too deep to be a receipt
+            receipt = None
+    if isinstance(receipt, dict) and "mindroom_tool_output" in receipt:
+        return None
+    if result.startswith("[cwd: "):
+        # MindRoom versions that lead every result with the working directory.
+        result = result.partition("\n")[2]
+    # The last `Stderr:` line starts the stderr section, so one that stdout prints ahead of it stays in stdout. The text
+    # alone cannot tell a `Stderr:` line that stderr prints, or that stdout prints when there is no stderr, from the
+    # section's start; with a pull request URL on both sides of it, those link the one before it.
+    stdout = "" if result.startswith("Exit code ") else f"\n{result}".rsplit("\nStderr:\n", 1)[0]
+    return last_pull_request(stdout) or last_pull_request(result)
 
 
 @hook(event="tool:after_call", name="link-created-pull-request", timeout_ms=5000)

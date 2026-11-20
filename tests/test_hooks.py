@@ -127,12 +127,13 @@ async def test_gh_pr_new_links_the_created_pull_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_create_links_the_existing_pull_request() -> None:
-    """A `gh pr create` that fails because the branch has a pull request links that pull request."""
+@pytest.mark.parametrize("header", ["", "[cwd: /w]\n"])
+async def test_failed_create_links_the_existing_pull_request(header: str) -> None:
+    """A failed `gh pr create` links the branch's existing pull request, with or without a leading cwd line."""
     module = _load_hooks_module()
     ctx = _context(
         result=(
-            "[cwd: /w]\nExit code 1\n"
+            f"{header}Exit code 1\nOutput:\nSee https://github.com/o/r/pull/3\nStderr:\n"
             'a pull request for branch "x" into branch "main" already exists:\n'
             "https://github.com/o/r/pull/12\n"
         ),
@@ -142,6 +143,58 @@ async def test_failed_create_links_the_existing_pull_request() -> None:
 
     ctx.put_room_state.assert_awaited_once()
     assert ctx.put_room_state.await_args.args[2] == '["$thread-root","o/r#12"]'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notice", ["", "[Showing the last 1 of 2 stderr lines. Pass a larger tail.]\n"])
+async def test_successful_create_links_the_stdout_url_over_a_stderr_url(notice: str) -> None:
+    """A successful create links the URL `gh` printed to stdout, not one a warning on stderr mentions."""
+    module = _load_hooks_module()
+    ctx = _context(result=f"{notice}{PR_URL}\nStderr:\nwarning: see https://github.com/o/r/pull/5")
+
+    await module.link_created_pull_request(ctx)
+
+    ctx.put_room_state.assert_awaited_once()
+    assert ctx.put_room_state.await_args.args[2] == '["$thread-root","o/r#7"]'
+
+
+@pytest.mark.asyncio
+async def test_a_stderr_line_printed_to_stdout_stays_in_stdout() -> None:
+    """A `Stderr:` line that stdout prints ahead of the stderr section does not hide the URL printed after it."""
+    module = _load_hooks_module()
+    stdout = f"Previous https://github.com/o/r/pull/5\nStderr:\n{PR_URL}"
+    ctx = _context(result=f"{stdout}\nStderr:\nwarning: see https://github.com/o/r/pull/3")
+
+    await module.link_created_pull_request(ctx)
+
+    ctx.put_room_state.assert_awaited_once()
+    assert ctx.put_room_state.await_args.args[2] == '["$thread-root","o/r#7"]'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_text", [True, False], ids=["json", "dict"])
+async def test_saved_output_receipt_links_nothing(as_text: bool) -> None:
+    """The receipt of a create whose output went to a file links nothing, as JSON text or as an auto-save's dict."""
+    module = _load_hooks_module()
+    receipt = {"status": "saved_to_file", "path": "out.txt", "preview": "see https://github.com/o/r/pull/5"}
+    envelope = {"mindroom_tool_output": receipt}
+    ctx = _context(result=json.dumps(envelope) if as_text else envelope)
+
+    await module.link_created_pull_request(ctx)
+
+    ctx.put_room_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overrides", [{"tool_name": "other_tool"}, {}], ids=["other-tool", "shell"])
+async def test_deeply_nested_json_output_is_not_decoded_into_an_error(overrides: dict[str, Any]) -> None:
+    """Output that nests deeper than JSON decoding recurses is no receipt: the hook returns and writes nothing."""
+    module = _load_hooks_module()
+    ctx = _context(result='{"a":' * 20000 + "1" + "}" * 20000, **overrides)
+
+    await module.link_created_pull_request(ctx)
+
+    ctx.put_room_state.assert_not_awaited()
 
 
 def _github_result(**fields: object) -> str:
