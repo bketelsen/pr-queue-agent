@@ -3,8 +3,8 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/mindroom-ai/pull-request-plugin/actions/workflows/plugin-ci.yml/badge.svg)](https://github.com/mindroom-ai/pull-request-plugin/actions/workflows/plugin-ci.yml)
 [![Docs](https://img.shields.io/badge/docs-plugins-blue)](https://docs.mindroom.chat/plugins/)
-[![Hooks](https://img.shields.io/badge/docs-hooks-blue)](https://docs.mindroom.chat/hooks/)
 [![Tools](https://img.shields.io/badge/docs-tools-blue)](https://docs.mindroom.chat/tools/)
+[![Hooks](https://img.shields.io/badge/docs-hooks-blue)](https://docs.mindroom.chat/hooks/)
 
 <picture>
   <source media="(prefers-reduced-motion: no-preference)" srcset="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark-animated.svg" />
@@ -40,7 +40,7 @@ agents:
 The auto-linking hook works for every agent automatically once the plugin is loaded, and no plugin `settings:` are needed. Add `pull_requests` to `agents.<name>.tools` for any agent that should also link, unlink, or list PRs manually.
 
 Update later with `mindroom plugins update pull-request-plugin`.
-Requires MindRoom plugin API 1.30 or later.
+Needs MindRoom v2026.11.323 or later (plugin API 1.30).
 
 ## Tools
 
