@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 PACKAGE_NAME = f"mindroom_plugin_{Path(__file__).resolve().parents[1].name.replace('-', '_')}"
 EVENT_TYPE = "com.mindroom.thread.pull_request"
+TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 
 
 def _load_state_module() -> ModuleType:
@@ -143,11 +144,12 @@ def _key(thread_id: str, name: str) -> str:
 
 
 def test_read_thread_links_filters_and_orders() -> None:
-    """Only valid links of the thread come back, ordered by set_at."""
+    """Only valid links of the thread come back, ordered by (set_at, name)."""
     module = _load_state_module()
     calls: list[tuple[str, str, str | None]] = []
     states: dict[str, Any] = {
         _key("$t", "o/r#2"): {"url": "https://github.com/o/r/pull/2", "set_by": "@a:x", "set_at": "2026-02"},
+        _key("$t", "o/r#10"): {"url": "https://github.com/o/r/pull/10", "set_by": "@c:x", "set_at": "2026-01"},
         _key("$t", "o/r#1"): {"url": "https://github.com/o/r/pull/1", "set_by": "@b:x", "set_at": "2026-01"},
         _key("$t", "o/r#3"): {},
         "not json": {"url": "https://github.com/o/r/pull/9", "set_by": "@a:x", "set_at": "2026-03"},
@@ -161,7 +163,7 @@ def test_read_thread_links_filters_and_orders() -> None:
         return states
 
     links = asyncio.run(module.read_thread_links(query, "!room", "$t"))
-    assert [link.pull_request.name for link in links] == ["o/r#1", "o/r#2"]
+    assert [link.pull_request.name for link in links] == ["o/r#1", "o/r#10", "o/r#2"]
     assert links[0].set_by == "@b:x"
     assert links[0].set_at == "2026-01"
     assert calls == [("!room", EVENT_TYPE, None)]
@@ -195,3 +197,100 @@ def test_write_and_clear_thread_link() -> None:
         ("!room", EVENT_TYPE, key, {"url": "https://github.com/o/r/pull/7", "set_by": "@a:x", "set_at": "2026-01"}),
         ("!room", EVENT_TYPE, key, {}),
     ]
+
+
+def test_read_room_links_filters_and_orders_deterministically() -> None:
+    """Room links include every valid thread link sorted by (set_at, thread_id, name)."""
+    module = _load_state_module()
+    calls: list[tuple[str, str, str | None]] = []
+    states: dict[str, Any] = {
+        _key("$t2", "o/r#1"): {"url": "https://github.com/o/r/pull/1", "set_by": "@a:x", "set_at": "2026-01"},
+        _key("$t1", "o/r#2"): {"url": "https://github.com/o/r/pull/2", "set_by": "@a:x", "set_at": "2026-01"},
+        _key("$t1", "o/r#1"): {"url": "https://github.com/o/r/pull/1", "set_by": "@a:x", "set_at": "2026-01"},
+        _key("$t0", "o/r#9"): {"url": "https://github.com/o/r/pull/9", "set_by": "@a:x", "set_at": "2026-02"},
+        _key("$t1", "o/r#3"): {},
+        '["$t1", "o/r#4"]': {"url": "https://github.com/o/r/pull/4", "set_by": "@a:x", "set_at": "2026-01"},
+        _key("", "o/r#5"): {"url": "https://github.com/o/r/pull/5", "set_by": "@a:x", "set_at": "2026-01"},
+        _key("   ", "o/r#6"): {"url": "https://github.com/o/r/pull/6", "set_by": "@a:x", "set_at": "2026-01"},
+        _key("$t1", "o/r#7"): {"url": "https://github.com/o/r/pull/8", "set_by": "@a:x", "set_at": "2026-01"},
+        "not json": {"url": "https://github.com/o/r/pull/9", "set_by": "@a:x", "set_at": "2026-01"},
+    }
+
+    async def query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
+        calls.append((room_id, event_type, state_key))
+        return states
+
+    links = asyncio.run(module.read_room_links(query, "!room"))
+    assert links is not None
+    assert [(thread_id, link.pull_request.name) for thread_id, link in links] == [
+        ("$t1", "o/r#1"),
+        ("$t1", "o/r#2"),
+        ("$t2", "o/r#1"),
+        ("$t0", "o/r#9"),
+    ]
+    assert calls == [("!room", EVENT_TYPE, None)]
+
+
+def test_read_room_links_distinguishes_failure_from_empty() -> None:
+    """A failed room state read returns None, while an empty room returns []."""
+    module = _load_state_module()
+
+    async def fail_query(_room_id: str, _event_type: str, _state_key: str | None) -> dict[str, Any] | None:
+        return None
+
+    async def empty_query(_room_id: str, _event_type: str, _state_key: str | None) -> dict[str, Any] | None:
+        return {}
+
+    assert asyncio.run(module.read_room_links(fail_query, "!room")) is None
+    assert asyncio.run(module.read_room_links(empty_query, "!room")) == []
+
+
+def test_read_resolved_thread_ids_parses_tags_and_ignores_tombstones() -> None:
+    """Only valid resolved tag records with set_by and ISO set_at are returned; tombstones and malformed entries are ignored."""
+    module = _load_state_module()
+    calls: list[tuple[str, str, str | None]] = []
+    valid_record = {"set_by": "@a:x", "set_at": "2026-01-01T00:00:00Z"}
+    states: dict[str, Any] = {
+        '["$t1","resolved"]': valid_record,
+        '["$t2", "resolved"]': {"set_by": "@b:x", "set_at": "2026-11-22T18:11:53.346Z", "note": "done"},
+        '["$t_offset","resolved"]': {"set_by": "@c:x", "set_at": "2026-01-02T00:00:00+00:00"},
+        '["$t_note_only","resolved"]': {"note": "done"},
+        '["$t_no_set_at","resolved"]': {"set_by": "@a:x"},
+        '["$t_no_set_by","resolved"]': {"set_at": "2026-01-01T00:00:00Z"},
+        '["$t_blank_by","resolved"]': {"set_by": "   ", "set_at": "2026-01-01T00:00:00Z"},
+        '["$t_blank_at","resolved"]': {"set_by": "@a:x", "set_at": "   "},
+        '["$t_bad_at","resolved"]': {"set_by": "@a:x", "set_at": "bad"},
+        '["$t_partial_at","resolved"]': {"set_by": "@a:x", "set_at": "2026-01"},
+        '["$t_padded_at","resolved"]': {"set_by": "@a:x", "set_at": " 2026-01-01T00:00:00Z "},
+        '["$t_int_at","resolved"]': {"set_by": "@a:x", "set_at": 123},
+        '["$t_bad_types","resolved"]': {"set_by": 123, "set_at": "2026-01-01T00:00:00Z"},
+        '["$t3","resolved"]': {},
+        '["$t4","blocked"]': valid_record,
+        '["","resolved"]': valid_record,
+        '["   ","resolved"]': valid_record,
+        '["$t5","resolved"]': None,
+        '["$t6","resolved","extra"]': valid_record,
+        '[123,"resolved"]': valid_record,
+        "$legacy": {"tags": {"resolved": valid_record}},
+    }
+
+    async def query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
+        calls.append((room_id, event_type, state_key))
+        return states
+
+    assert asyncio.run(module.read_resolved_thread_ids(query, "!room")) == {"$t1", "$t2", "$t_offset"}
+    assert calls == [("!room", TAGS_EVENT_TYPE, None)]
+
+
+def test_read_resolved_thread_ids_distinguishes_failure_from_empty() -> None:
+    """A failed tag query returns None, while an empty room returns an empty set."""
+    module = _load_state_module()
+
+    async def fail_query(_room_id: str, _event_type: str, _state_key: str | None) -> dict[str, Any] | None:
+        return None
+
+    async def empty_query(_room_id: str, _event_type: str, _state_key: str | None) -> dict[str, Any] | None:
+        return {}
+
+    assert asyncio.run(module.read_resolved_thread_ids(fail_query, "!room")) is None
+    assert asyncio.run(module.read_resolved_thread_ids(empty_query, "!room")) == set()
