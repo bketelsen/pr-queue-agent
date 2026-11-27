@@ -199,6 +199,94 @@ def test_write_and_clear_thread_link() -> None:
     ]
 
 
+def test_room_link_state_key_is_compact_json_with_null_thread() -> None:
+    """A room-level record keys on a null thread and the pull request name."""
+    module = _load_state_module()
+    key = module.room_link_state_key(module.PullRequest("o", "r", 7))
+    assert key == '[null,"o/r#7"]'
+
+
+def test_read_room_pull_request_queries_one_exact_state_event() -> None:
+    """A room-level record is read with the exact event type and state key."""
+    module = _load_state_module()
+    calls: list[tuple[str, str, str | None]] = []
+    content = {"url": "https://github.com/o/r/pull/7", "set_by": "@a:x", "set_at": "2026-01-01T00:00:00+00:00"}
+
+    async def query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
+        calls.append((room_id, event_type, state_key))
+        return content
+
+    link = asyncio.run(module.read_room_pull_request(query, "!room", module.PullRequest("o", "r", 7)))
+    assert link == module.ThreadLink(module.PullRequest("o", "r", 7), "@a:x", "2026-01-01T00:00:00+00:00")
+    assert calls == [("!room", EVENT_TYPE, '[null,"o/r#7"]')]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        {},
+        [],
+        {"url": "https://github.com/o/r/pull/8", "set_by": "@a:x", "set_at": "2026-01"},
+        {"url": "https://github.com/o/r/pull/7", "set_at": "2026-01"},
+        {"url": "https://github.com/o/r/pull/7", "set_by": "@a:x"},
+        {"url": "https://github.com/o/r/pull/7", "set_by": 1, "set_at": "2026-01"},
+        {"url": "https://github.com/o/r/pull/7", "set_by": "@a:x", "set_at": 5},
+        {"url": "not a url", "set_by": "@a:x", "set_at": "2026-01"},
+    ],
+)
+def test_read_room_pull_request_rejects_missing_or_invalid_records(content: object) -> None:
+    """A missing, tombstoned, or mismatched room record is no valid record."""
+    module = _load_state_module()
+    calls: list[tuple[str, str, str | None]] = []
+
+    async def query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
+        calls.append((room_id, event_type, state_key))
+        return content  # type: ignore[return-value]
+
+    assert asyncio.run(module.read_room_pull_request(query, "!room", module.PullRequest("o", "r", 7))) is None
+    assert calls == [("!room", EVENT_TYPE, '[null,"o/r#7"]')]
+
+
+def test_write_room_pull_request_writes_canonical_payload() -> None:
+    """A room-level record uses the null-thread key and the same payload fields."""
+    module = _load_state_module()
+    puts: list[tuple[str, str, str, dict[str, Any]]] = []
+
+    async def put(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> bool:
+        puts.append((room_id, event_type, state_key, content))
+        return True
+
+    link = module.ThreadLink(module.PullRequest("o", "r", 7), "@a:x", "2026-01")
+    assert asyncio.run(module.write_room_pull_request(put, "!room", link)) is True
+    assert puts == [
+        (
+            "!room",
+            EVENT_TYPE,
+            '[null,"o/r#7"]',
+            {"url": "https://github.com/o/r/pull/7", "set_by": "@a:x", "set_at": "2026-01"},
+        ),
+    ]
+
+
+def test_thread_and_room_readers_ignore_room_level_records() -> None:
+    """Thread-keyed readers ignore the null-thread room records."""
+    module = _load_state_module()
+    states: dict[str, Any] = {
+        '[null,"o/r#7"]': {"url": "https://github.com/o/r/pull/7", "set_by": "@a:x", "set_at": "2026-01"},
+        _key("$t", "o/r#8"): {"url": "https://github.com/o/r/pull/8", "set_by": "@a:x", "set_at": "2026-02"},
+    }
+
+    async def query(_room_id: str, _event_type: str, _state_key: str | None) -> dict[str, Any] | None:
+        return states
+
+    thread_links = asyncio.run(module.read_thread_links(query, "!room", "$t"))
+    room_links = asyncio.run(module.read_room_links(query, "!room"))
+    assert [link.pull_request.name for link in thread_links] == ["o/r#8"]
+    assert room_links is not None
+    assert [(thread_id, link.pull_request.name) for thread_id, link in room_links] == [("$t", "o/r#8")]
+
+
 def test_read_room_links_filters_and_orders_deterministically() -> None:
     """Room links include every valid thread link sorted by (set_at, thread_id, name)."""
     module = _load_state_module()
