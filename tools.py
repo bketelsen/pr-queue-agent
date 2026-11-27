@@ -30,14 +30,18 @@ from .state import (
     parse_pull_request,
     read_resolved_thread_ids,
     read_room_links,
+    read_room_pull_request,
     read_thread_links,
+    write_room_pull_request,
     write_thread_link,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from .state import RoomStatePutter, RoomStateQuerier
 
-_VALID_ACTIONS = frozenset({"link", "unlink", "list"})
+_VALID_ACTIONS = frozenset({"link", "unlink", "submit", "list"})
 _ROOM_QUERY_CONCURRENCY = 6
 logger = get_logger(__name__)
 
@@ -67,6 +71,28 @@ def _resolve_read_access(action: str) -> tuple[ToolRuntimeContext, RoomStateQuer
     return context, querier
 
 
+def _resolve_putter(action: str, context: ToolRuntimeContext) -> RoomStatePutter | str:
+    """Resolve the room-state putter or a structured error."""
+    putter = context.hooks.room_state_putter
+    if putter is None:
+        return _error(action, "Pull request room-state access is unavailable in this runtime path.")
+    return putter
+
+
+def _resolve_put_access(
+    action: str,
+) -> tuple[ToolRuntimeContext, RoomStateQuerier, RoomStatePutter] | str:
+    """Resolve room-state read/write access, with or without an active thread."""
+    access = _resolve_read_access(action)
+    if isinstance(access, str):
+        return access
+    context, querier = access
+    putter = _resolve_putter(action, context)
+    if isinstance(putter, str):
+        return putter
+    return context, querier, putter
+
+
 def _resolve_write_access(
     action: str,
 ) -> tuple[ToolRuntimeContext, str, str, RoomStateQuerier, RoomStatePutter] | str:
@@ -77,9 +103,9 @@ def _resolve_write_access(
     context, querier = access
     if context.resolved_thread_id is None:
         return _error(action, f"An active thread is required to {action} pull requests.")
-    putter = context.hooks.room_state_putter
-    if putter is None:
-        return _error(action, "Pull request room-state access is unavailable in this runtime path.")
+    putter = _resolve_putter(action, context)
+    if isinstance(putter, str):
+        return putter
     return context, context.room_id, context.resolved_thread_id, querier, putter
 
 
@@ -226,6 +252,46 @@ async def _link_pull_request(url: str | None) -> str:
     return _payload("ok", action="link", thread_id=thread_id, changed=True)
 
 
+async def _has_submitted_pull_request(
+    querier: RoomStateQuerier,
+    room_id: str,
+    pull_request: PullRequest,
+    thread_id: str | None,
+) -> bool:
+    """Return whether the pull request is already recorded for the active thread or room."""
+    if thread_id is None:
+        return await read_room_pull_request(querier, room_id, pull_request) is not None
+    links = await read_thread_links(querier, room_id, thread_id)
+    return any(link.pull_request == pull_request for link in links)
+
+
+async def _submit_pull_request(url: str | None) -> str:
+    """Record a pull request in the active thread, or in the current room outside a thread."""
+    pull_request = _parse_or_error("submit", url)
+    if isinstance(pull_request, str):
+        return pull_request
+    access = _resolve_put_access("submit")
+    if isinstance(access, str):
+        return access
+    context, querier, putter = access
+    thread_id = context.resolved_thread_id
+    scope: dict[str, object] = (
+        {"thread_id": thread_id} if thread_id is not None else {"scope": "room", "room_id": context.room_id}
+    )
+
+    if await _has_submitted_pull_request(querier, context.room_id, pull_request, thread_id):
+        return _payload("ok", action="submit", changed=False, **scope)
+
+    link = ThreadLink(pull_request, context.agent_name or context.requester_id, _now_iso())
+    if thread_id is not None:
+        written = await write_thread_link(putter, context.room_id, thread_id, link)
+    else:
+        written = await write_room_pull_request(putter, context.room_id, link)
+    if not written:
+        return _error("submit", "Failed to write the pull request state event.")
+    return _payload("ok", action="submit", changed=True, **scope)
+
+
 async def _unlink_pull_request(url: str | None) -> str:
     pull_request = _parse_or_error("unlink", url)
     if isinstance(pull_request, str):
@@ -273,59 +339,65 @@ async def _list_pull_requests(*, room_id: str | None, resolved: bool | None) -> 
     return await _list_room_pull_requests(context, querier, room_id=target_room_id, resolved=validated_resolved)
 
 
+_WRITE_ACTION_HANDLERS: dict[str, Callable[[str | None], Awaitable[str]]] = {
+    "link": _link_pull_request,
+    "unlink": _unlink_pull_request,
+    "submit": _submit_pull_request,
+}
+
+
 class PullRequestTools(Toolkit):
-    """Toolkit for linking, unlinking, and listing GitHub pull requests across threads and rooms."""
+    """Toolkit for linking, unlinking, submitting, and listing GitHub pull requests."""
 
     def __init__(self) -> None:
         super().__init__(
             name="pull_requests",
             instructions=(
                 "PRs created via `gh pr create` or the GitHub tool auto-link to this thread. "
-                "Use `pull_requests` to link/unlink PRs on this thread or list linked PRs for this thread, "
-                "a room, or all shared rooms."
+                "Use `pull_requests` to link/unlink PRs on this thread, submit PRs into this thread or the current room, "
+                "or list linked PRs for this thread, a room, or all shared rooms."
             ),
         )
 
     @tool
     async def pull_requests(
         self,
-        action: Literal["link", "unlink", "list"],
+        action: Literal["link", "unlink", "submit", "list"],
         url: str | None = None,
         room_id: str | None = None,
         resolved: bool | None = None,
     ) -> str:
-        """Link, unlink, or list GitHub pull requests.
+        """Link, unlink, submit, or list GitHub pull requests.
 
         Actions:
         - link / unlink: require `url` (applies to the current thread).
+        - submit: requires `url`; records it in the current thread, or in the current room outside a thread.
         - list: omit `room_id`/`resolved` for the current thread; pass `room_id="room"` (current room), a room ID/alias/name, `room_id="all"` (all shared rooms), and/or `resolved=True|False`.
 
         Args:
-            action: Operation to perform: `"link"`, `"unlink"`, or `"list"`.
-            url: GitHub PR URL (required for `"link"` and `"unlink"`).
+            action: Operation to perform: `"link"`, `"unlink"`, `"submit"`, or `"list"`.
+            url: GitHub PR URL (required for `"link"`, `"unlink"`, and `"submit"`).
             room_id: For `"list"`: `"room"` (current room), a room ID/alias/name, or `"all"` (all shared rooms).
             resolved: For `"list"` (room/all): `True` = resolved threads only, `False` = unresolved only.
 
         """
         if not isinstance(action, str) or action not in _VALID_ACTIONS:
             error_action = action if isinstance(action, str) and action.strip() else "unknown"
-            return _error(error_action, "action must be 'link', 'unlink', or 'list'.")
+            return _error(error_action, "action must be 'link', 'unlink', 'submit', or 'list'.")
         if action == "list":
             if url is not None:
-                return _error("list", "url applies only to action='link' and action='unlink'.")
+                return _error("list", "url applies only to action='link', action='unlink', and action='submit'.")
             return await _list_pull_requests(room_id=room_id, resolved=resolved)
         if room_id is not None or resolved is not None:
             return _error(action, "room_id and resolved apply only to action='list'.")
-        if action == "link":
-            return await _link_pull_request(url)
-        return await _unlink_pull_request(url)
+        return await _WRITE_ACTION_HANDLERS[action](url)
 
 
 @register_tool_with_metadata(
     name="pull_requests",
     file_access=ToolFileAccess.NONE,
     display_name="Pull Requests",
-    description="Link, unlink, or list GitHub pull requests for a thread, room, or all shared rooms.",
+    description="Link, unlink, submit, or list GitHub pull requests for a thread, room, or all shared rooms.",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

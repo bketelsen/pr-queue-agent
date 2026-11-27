@@ -1,5 +1,5 @@
 # ruff: noqa: INP001
-"""Pull request links of a thread, backed by Matrix room state."""
+"""Pull request links of a thread or room, backed by Matrix room state."""
 
 from __future__ import annotations
 
@@ -80,6 +80,11 @@ def link_state_key(thread_id: str, pull_request: PullRequest) -> str:
     return json.dumps([thread_id, pull_request.name], separators=(",", ":"))
 
 
+def room_link_state_key(pull_request: PullRequest) -> str:
+    """Return the room-state key of one pull request recorded for the whole room."""
+    return json.dumps([None, pull_request.name], separators=(",", ":"))
+
+
 def _parse_state_key_pair(state_key: object) -> tuple[str, str] | None:
     if not isinstance(state_key, str):
         return None
@@ -98,26 +103,34 @@ def _parse_state_key_pair(state_key: object) -> tuple[str, str] | None:
     return thread_id, second
 
 
-def _parse_room_link(state_key: str, content: object) -> tuple[str, ThreadLink] | None:
-    pair = _parse_state_key_pair(state_key)
-    if pair is None or not isinstance(content, Mapping) or not content:
+def _parse_link_content(content: object) -> ThreadLink | None:
+    """Parse one link payload, whatever its state key names."""
+    if not isinstance(content, Mapping) or not content:
         return None
-    thread_id, _ = pair
     pull_request = parse_pull_request(content.get("url"))
     set_by = content.get("set_by")
     set_at = content.get("set_at")
     if pull_request is None or not isinstance(set_by, str) or not isinstance(set_at, str):
         return None
-    if state_key != link_state_key(thread_id, pull_request):
+    return ThreadLink(pull_request, set_by, set_at)
+
+
+def _parse_room_link(state_key: str, content: object) -> tuple[str, ThreadLink] | None:
+    pair = _parse_state_key_pair(state_key)
+    if pair is None:
         return None
-    return thread_id, ThreadLink(pull_request, set_by, set_at)
+    thread_id, _ = pair
+    link = _parse_link_content(content)
+    if link is None or state_key != link_state_key(thread_id, link.pull_request):
+        return None
+    return thread_id, link
 
 
 async def read_room_links(
     query_room_state: RoomStateQuerier,
     room_id: str,
 ) -> list[tuple[str, ThreadLink]] | None:
-    """Read all valid pull request links of one room, ordered deterministically."""
+    """Read all valid thread-keyed pull request links of one room, ordered deterministically."""
     states = await query_room_state(room_id, THREAD_PULL_REQUEST_EVENT_TYPE, None)
     if states is None:
         return None
@@ -178,6 +191,19 @@ async def read_resolved_thread_ids(
     return resolved
 
 
+async def read_room_pull_request(
+    query_room_state: RoomStateQuerier,
+    room_id: str,
+    pull_request: PullRequest,
+) -> ThreadLink | None:
+    """Read one room-level pull request record, or None if it is absent or invalid."""
+    content = await query_room_state(room_id, THREAD_PULL_REQUEST_EVENT_TYPE, room_link_state_key(pull_request))
+    link = _parse_link_content(content)
+    if link is None or link.pull_request != pull_request:
+        return None
+    return link
+
+
 async def write_thread_link(
     put_room_state: RoomStatePutter,
     room_id: str,
@@ -189,6 +215,20 @@ async def write_thread_link(
         room_id,
         THREAD_PULL_REQUEST_EVENT_TYPE,
         link_state_key(thread_id, link.pull_request),
+        {"url": link.pull_request.url, "set_by": link.set_by, "set_at": link.set_at},
+    )
+
+
+async def write_room_pull_request(
+    put_room_state: RoomStatePutter,
+    room_id: str,
+    link: ThreadLink,
+) -> bool:
+    """Write one room-level pull request record."""
+    return await put_room_state(
+        room_id,
+        THREAD_PULL_REQUEST_EVENT_TYPE,
+        room_link_state_key(link.pull_request),
         {"url": link.pull_request.url, "set_by": link.set_by, "set_at": link.set_at},
     )
 

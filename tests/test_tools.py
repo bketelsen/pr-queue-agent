@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import sys
+from datetime import datetime
 from importlib import util
 from pathlib import Path
 from types import SimpleNamespace
@@ -177,12 +178,14 @@ def test_action_scoped_grants_separate_operations_per_action() -> None:
     list_op = grant_operation(config, "pull_requests", {"action": "list"}, tools=registry)
     unlink_op = grant_operation(config, "pull_requests", {"action": "unlink"}, tools=registry)
     link_op = grant_operation(config, "pull_requests", {"action": "link"}, tools=registry)
+    submit_op = grant_operation(config, "pull_requests", {"action": "submit"}, tools=registry)
 
     assert list_op is not None
     assert unlink_op is not None
     assert link_op is not None
+    assert submit_op is not None
     assert list_op == grant_operation(config, "pull_requests", {"action": " list "}, tools=registry)
-    assert len({list_op.key, unlink_op.key, link_op.key}) == 3
+    assert len({list_op.key, unlink_op.key, link_op.key, submit_op.key}) == 4
     for bad_args in ({}, {"action": ""}, {"action": "   "}, {"action": 123}):
         assert grant_operation(config, "pull_requests", bad_args, tools=registry) is None
     assert not scheduled_call_offers_any_arguments(
@@ -308,7 +311,7 @@ async def test_link_rejects_missing_or_non_pull_request_url(url: str | None) -> 
     room.querier.assert_not_awaited()
 
 
-@pytest.mark.parametrize("action", ["link", "unlink"])
+@pytest.mark.parametrize("action", ["link", "unlink", "submit"])
 @pytest.mark.parametrize(
     "extra",
     [
@@ -320,8 +323,8 @@ async def test_link_rejects_missing_or_non_pull_request_url(url: str | None) -> 
     ],
 )
 @pytest.mark.asyncio
-async def test_link_and_unlink_reject_list_only_arguments(action: str, extra: dict[str, Any]) -> None:
-    """Passing room_id or resolved is rejected for link and unlink actions."""
+async def test_write_actions_reject_list_only_arguments(action: str, extra: dict[str, Any]) -> None:
+    """Passing room_id or resolved is rejected for link, unlink, and submit."""
     tools = _load_tools_module().PullRequestTools()
     room = FakeRoomState()
 
@@ -405,6 +408,160 @@ async def test_tool_errors_without_runtime_context_or_putter() -> None:
     assert no_putter["status"] == "error"
     assert no_putter["action"] == "link"
     room.querier.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_submit_inside_thread_uses_the_thread_link_schema() -> None:
+    """Submitting in a thread links the PR like link does, reports submit, and is idempotent."""
+    tools = _load_tools_module().PullRequestTools()
+    room = FakeRoomState()
+
+    with room.context():
+        first = json.loads(await tools.pull_requests(action="submit", url="https://github.com/Owner/Repo/pull/7"))
+        again = json.loads(await tools.pull_requests(action="submit", url="https://github.com/owner/repo/pull/7"))
+
+    assert first == {
+        "status": "ok",
+        "tool": "pull_requests",
+        "action": "submit",
+        "thread_id": THREAD,
+        "changed": True,
+    }
+    assert again == {**first, "changed": False}
+    assert set(room.state) == {_key("owner/repo#7")}
+    content = room.state[_key("owner/repo#7")]
+    assert content["url"] == "https://github.com/owner/repo/pull/7"
+    assert content["set_by"] == "code"
+    datetime.fromisoformat(content["set_at"])
+    assert room.putter.await_count == 1
+    assert [call.args for call in room.querier.await_args_list] == [(ROOM, EVENT_TYPE, None)] * 2
+
+
+@pytest.mark.asyncio
+async def test_submit_outside_thread_writes_an_idempotent_room_record() -> None:
+    """Outside a thread, submit writes one null-thread record for the current room and reports it."""
+    tools = _load_tools_module().PullRequestTools()
+    room = FakeRoomState()
+
+    with room.context(thread_id=None, resolved_thread_id=None):
+        first = json.loads(await tools.pull_requests(action="submit", url="https://github.com/Owner/Repo/pull/7?w=1"))
+        again = json.loads(await tools.pull_requests(action="submit", url="https://github.com/owner/repo/pull/7"))
+
+    assert first == {
+        "status": "ok",
+        "tool": "pull_requests",
+        "action": "submit",
+        "scope": "room",
+        "room_id": ROOM,
+        "changed": True,
+    }
+    assert again == {**first, "changed": False}
+    key = (ROOM, EVENT_TYPE, '[null,"owner/repo#7"]')
+    assert set(room.state) == {key}
+    content = room.state[key]
+    assert content["url"] == "https://github.com/owner/repo/pull/7"
+    assert content["set_by"] == "code"
+    datetime.fromisoformat(content["set_at"])
+    assert room.putter.await_count == 1
+    assert [call.args for call in room.querier.await_args_list] == [(ROOM, EVENT_TYPE, '[null,"owner/repo#7"]')] * 2
+
+
+@pytest.mark.asyncio
+async def test_submit_outside_thread_rewrites_a_tombstoned_room_record() -> None:
+    """An empty room record is no existing record, so submit writes the PR again."""
+    tools = _load_tools_module().PullRequestTools()
+    room = FakeRoomState()
+    key = (ROOM, EVENT_TYPE, '[null,"owner/repo#7"]')
+    room.state[key] = {}
+
+    with room.context(thread_id=None, resolved_thread_id=None):
+        result = json.loads(await tools.pull_requests(action="submit", url="https://github.com/owner/repo/pull/7"))
+
+    assert result["changed"] is True
+    assert room.state[key]["url"] == "https://github.com/owner/repo/pull/7"
+    assert room.putter.await_count == 1
+
+
+@pytest.mark.parametrize("url", [None, "", "https://github.com/owner/repo/issues/7", "not a url"])
+@pytest.mark.asyncio
+async def test_submit_rejects_missing_or_non_pull_request_url(url: str | None) -> None:
+    """A malformed submit URL errors and touches no state, in or outside a thread."""
+    tools = _load_tools_module().PullRequestTools()
+    room = FakeRoomState()
+
+    with room.context():
+        in_thread = json.loads(await tools.pull_requests(action="submit", url=url))
+    with room.context(thread_id=None, resolved_thread_id=None):
+        outside_thread = json.loads(await tools.pull_requests(action="submit", url=url))
+
+    for result in (in_thread, outside_thread):
+        assert result["status"] == "error"
+        assert result["tool"] == "pull_requests"
+        assert result["action"] == "submit"
+    assert room.state == {}
+    room.querier.assert_not_awaited()
+    room.putter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_submit_write_denial_gives_error() -> None:
+    """A putter that returns False surfaces as an error for thread and room records."""
+    tools = _load_tools_module().PullRequestTools()
+    room = FakeRoomState(put_result=False)
+
+    with room.context():
+        in_thread = json.loads(await tools.pull_requests(action="submit", url="https://github.com/owner/repo/pull/7"))
+    with room.context(thread_id=None, resolved_thread_id=None):
+        outside_thread = json.loads(
+            await tools.pull_requests(action="submit", url="https://github.com/owner/repo/pull/7"),
+        )
+
+    assert [result["status"] for result in (in_thread, outside_thread)] == ["error", "error"]
+    assert [result["action"] for result in (in_thread, outside_thread)] == ["submit", "submit"]
+    assert "Failed to write" in in_thread["message"]
+    assert room.putter.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_submit_errors_without_runtime_context_or_putter() -> None:
+    """Submit returns a structured error without a runtime context or room-state putter."""
+    tools = _load_tools_module().PullRequestTools()
+
+    with tool_runtime_context(None):
+        no_context = json.loads(await tools.pull_requests(action="submit", url="https://github.com/owner/repo/pull/7"))
+
+    room = FakeRoomState()
+    read_only_ctx = _tool_context(
+        thread_id=None,
+        resolved_thread_id=None,
+        room_state_querier=room.querier,
+        room_state_putter=None,
+    )
+    with tool_runtime_context(read_only_ctx):
+        no_putter = json.loads(await tools.pull_requests(action="submit", url="https://github.com/owner/repo/pull/7"))
+
+    assert no_context["status"] == "error"
+    assert no_context["action"] == "submit"
+    assert no_putter["status"] == "error"
+    assert no_putter["action"] == "submit"
+    room.querier.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_ignores_room_level_submit_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Room-wide listing stays thread-only after a room-level submit."""
+    module = _load_tools_module()
+    monkeypatch.setattr(module, "resolve_accessible_room_id", AsyncMock(return_value=(ROOM, None)))
+    tools = module.PullRequestTools()
+    room = FakeRoomState()
+
+    with room.context(thread_id=None, resolved_thread_id=None):
+        await tools.pull_requests(action="submit", url="https://github.com/owner/repo/pull/7")
+        listed = json.loads(await tools.pull_requests(action="list", room_id="room"))
+
+    assert listed["status"] == "ok"
+    assert listed["count"] == 0
+    assert listed["pull_requests"] == []
 
 
 @pytest.mark.asyncio
